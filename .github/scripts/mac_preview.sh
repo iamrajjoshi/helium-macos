@@ -68,6 +68,7 @@ case "${1:-}" in
     ;;
   prepare)
     source "$ROOT/devutils/shared.sh"
+    echo '[preview:prepare] Prepare pinned source tree'
     prepare_sources 2>&1 | tee "$LOG/prepare.log"
     # Only task-owned downloaded archives are removed; installed host tools are untouched.
     rm -rf "$ROOT/build/download_cache"
@@ -84,10 +85,18 @@ concurrent_links=1
 enable_updater=false
 enable_sparkle=false
 GN
+    echo '[preview:prepare] Generate build graph'
     gn_gen 2>&1 | tee "$LOG/gn.log"
-    "$_gn_path" args "$_out_dir" --list --short > "$LOG/resolved-gn-args.txt"
+    echo '[preview:prepare] Resolve GN arguments from the Chromium source root'
+    # gn_gen's cd occurs in a pipeline subshell; it cannot set this shell's cwd.
+    (
+      cd "$_src_dir"
+      "$_gn_path" args "$_out_dir" --list --short
+    ) 2>&1 | tee "$LOG/resolved-gn-args.txt"
+    echo '[preview:prepare] Record source/configuration/toolchain provenance'
     record_provenance > "$LOG/provenance.json"
     cp "$_out_dir/args.gn" "$LOG/args.gn"
+    echo '[preview:prepare] Preparation complete'
     ;;
   restore)
     # The cache is exact-key, this run only. Check hashes before extracting any data.
