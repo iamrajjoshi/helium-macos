@@ -53,7 +53,7 @@ jobs:
           ref: ${{ inputs.source_sha }}
           path: helium-chromium
           persist-credentials: false
-      - name: Verify free cache settings without changing them
+      - name: Verify cache inventory against the fixed free allowance
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
