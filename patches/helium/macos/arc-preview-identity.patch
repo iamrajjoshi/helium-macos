@@ -1,0 +1,108 @@
+--- a/chrome/app/theme/chromium/BRANDING
++++ b/chrome/app/theme/chromium/BRANDING
+@@ -1,10 +1,10 @@
+ COMPANY_FULLNAME=The Helium Authors
+ COMPANY_SHORTNAME=The Helium Authors
+-PRODUCT_FULLNAME=Helium
+-PRODUCT_SHORTNAME=Helium
+-PRODUCT_INSTALLER_FULLNAME=Helium Installer
+-PRODUCT_INSTALLER_SHORTNAME=Helium Installer
++PRODUCT_FULLNAME=Helium Arc Preview
++PRODUCT_SHORTNAME=Helium Arc Preview
++PRODUCT_INSTALLER_FULLNAME=Helium Arc Preview Installer
++PRODUCT_INSTALLER_SHORTNAME=Helium Arc Preview Installer
+ COPYRIGHT=Copyright @LASTCHANGE_YEAR@ The Helium Authors. All rights reserved.
+-MAC_BUNDLE_ID=net.imput.helium
++MAC_BUNDLE_ID=io.github.iamrajjoshi.helium-arc-preview
+ MAC_CREATOR_CODE=Cr24
+-MAC_TEAM_ID=S4Q33XPHB4
++MAC_TEAM_ID=
+--- a/chrome/common/chrome_paths_mac.mm
++++ b/chrome/common/chrome_paths_mac.mm
+@@ -32,7 +32,7 @@
+     product_dir_name = [product_dir_name_ns fileSystemRepresentation];
+ 
+     if (!product_dir_name) {
+-      product_dir_name = "net.imput.helium";
++      product_dir_name = "io.github.iamrajjoshi.helium-arc-preview";
+     }
+ 
+     // Leaked, but the only caller initializes a static with this result, so it
+--- a/chrome/app/app-Info.plist
++++ b/chrome/app/app-Info.plist
+@@ -2,6 +2,8 @@
+ <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+ <plist version="1.0">
+ <dict>
++	<key>CrProductDirName</key>
++	<string>io.github.iamrajjoshi.helium-arc-preview</string>
+ 	<key>CFBundleDevelopmentRegion</key>
+ 	<string>en</string>
+ 	<key>CFBundleDisplayName</key>
+--- a/components/os_crypt/common/keychain_password_mac.mm
++++ b/components/os_crypt/common/keychain_password_mac.mm
+@@ -31,8 +31,8 @@
+ // These two strings ARE indeed user facing.  But they are used to access
+ // the encryption keyword.  So as to not lose encrypted data when system
+ // locale changes we DO NOT LOCALIZE.
+-const char kDefaultServiceName[] = "Helium Storage Key";
+-const char kDefaultAccountName[] = "Helium";
++const char kDefaultServiceName[] = "Helium Arc Preview Storage Key";
++const char kDefaultAccountName[] = "Helium Arc Preview";
+ 
+ // These values are persisted to logs. Entries should not be renumbered and
+ // numeric values should never be reused.
+--- a/chrome/common/chrome_paths_unittest.cc
++++ b/chrome/common/chrome_paths_unittest.cc
+@@ -19,6 +19,26 @@
+ #include "testing/gtest/include/gtest/gtest.h"
+ 
+ namespace chrome {
++
++#if BUILDFLAG(IS_MAC)
++TEST(HeliumArcPreviewIdentity, UsesSeparateDefaultDataAndCache) {
++  base::FilePath data_dir;
++  ASSERT_TRUE(GetDefaultUserDataDirectory(&data_dir));
++  EXPECT_EQ("io.github.iamrajjoshi.helium-arc-preview",
++            data_dir.BaseName().value());
++  base::FilePath app_data;
++  ASSERT_TRUE(base::PathService::Get(base::DIR_APP_DATA, &app_data));
++  EXPECT_EQ(app_data.Append("io.github.iamrajjoshi.helium-arc-preview"),
++            data_dir);
++  base::FilePath cache_dir;
++  GetUserCacheDirectory(data_dir.Append("Default"), &cache_dir);
++  base::FilePath cache_root;
++  ASSERT_TRUE(base::PathService::Get(base::DIR_CACHE, &cache_root));
++  EXPECT_EQ(cache_root.Append("io.github.iamrajjoshi.helium-arc-preview")
++                .Append("Default"),
++            cache_dir);
++}
++#endif
+ 
+ // Test the behavior of chrome::GetUserCacheDirectory.
+ // See that function's comments for discussion of the subtleties.
+--- a/chrome/browser/first_run/first_run.cc
++++ b/chrome/browser/first_run/first_run.cc
+@@ -193,6 +193,10 @@
+ // Makes chrome the user's default browser according to policy or
+ // |make_chrome_default_for_user| if no policy is set.
+ void ProcessDefaultBrowserPolicy(bool make_chrome_default_for_user) {
++#if BUILDFLAG(IS_MAC)
++  // The isolated personal preview never takes over an existing default browser.
++  return;
++#endif
+   // Only proceed if chrome can be made default unattended. In other cases, this
+   // is handled by the first run default browser prompt (on Windows 8+).
+   if (shell_integration::GetDefaultBrowserSetPermission() ==
+@@ -468,6 +472,11 @@
+     Profile* profile,
+     const std::string& import_bookmarks_path) {
+   g_auto_import_state |= AUTO_IMPORT_CALLED;
++#if BUILDFLAG(IS_MAC)
++  // Preserve the first-run state marker without reading another browser's data.
++  // The user can still explicitly choose a manual import in the browser UI.
++  return;
++#endif
+ 
+   // Use |profile|'s PrefService to determine what to import. It will reflect in
+   // order:
