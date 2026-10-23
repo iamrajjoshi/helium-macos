@@ -85,14 +85,24 @@ setup overhead: a capacity attempt, not a completion promise. Real compile
 errors fail. Exhausting every phase without a completed browser is a failure,
 never a green workflow without a DMG.
 
-Checkpoints use the Actions build-output cache. The workflow reads the cache
-setting and requires a known limit <=10 GiB without modifying it. Compressed
-checkpoints are <=9 GiB; unrelated usage plus checkpoint plus 128 MiB envelope
-reserve must fit the configured free cap. Unrelated caches are never deleted.
+Checkpoints use the Actions build-output cache. GitHub includes a separate
+10 GiB per-repository cache allowance on every plan (binary GiB, not decimal
+GB). The workflow enforces that **fixed 10 GiB aggregate ceiling**, without
+reading or changing the configured storage limit. Every unfiltered inventory
+page must have valid counts, unique IDs, keys and nonnegative integer sizes;
+denied, malformed, incomplete or changing inventories fail closed. Existing
+total usage must already fit the ceiling. Compressed checkpoints are <=9 GiB;
+unrelated usage plus checkpoint plus a 128 MiB envelope reserve must fit.
+Unrelated caches are never deleted.
 Only this run's consumed predecessor is deleted, after a successor archive is
 complete and hashed locally, immediately before saving the successor. This
 prevents two multi-GB copies accumulating, but means a failed successor upload
 can force rebuilding from scratch. Cache eviction can also prevent resume.
+Unrelated inventory must be unchanged after deletion; total usage is checked again after
+saving. The preview workflow is serialized, but API checks are not an atomic
+storage reservation: another workflow writing caches concurrently can race
+the guard. An overshoot is reported as failure, not claimed to be retroactively
+free. Do not run other cache-producing workflows concurrently with this build.
 
 Restore requires an exact cache hit, SHA-256 validation, and matching source
 and packaging commits, GN args hash, Xcode/SDK/Metal, Python, clang/GN/Siso
@@ -155,7 +165,7 @@ native tests have run**.
 - [Hosted six-hour job limit](https://docs.github.com/en/actions/reference/limits)
 - [Actions billing and included cache versus artifact storage](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
 - [Cache policy](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching)
-- [Read-only cache-limit API](https://docs.github.com/en/rest/actions/cache#get-github-actions-cache-storage-limit-for-a-repository)
+- [Cache inventory API](https://docs.github.com/en/rest/actions/cache#list-github-actions-caches-for-a-repository)
 - [Release-asset quotas](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases#storage-and-bandwidth-quotas)
 - [Pinned ThinLTO argument](https://github.com/chromium/chromium/blob/156.0.8078.47/build/config/compiler/compiler.gni)
 - [Pinned CFI defaults](https://github.com/chromium/chromium/blob/156.0.8078.47/build/config/sanitizers/sanitizers.gni)
