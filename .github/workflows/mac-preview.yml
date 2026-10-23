@@ -1,0 +1,22 @@
+name: Build isolated Helium Arc Preview (free ARM64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: 'Select arc-preview branch above; exact reviewed 40-character source commit'
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  select_preview_branch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Require the isolated preview branch
+        shell: bash
+        run: |
+          echo '::error::This default-branch entrypoint does not compile. Use Run workflow, select the arc-preview branch, and provide the reviewed source SHA.'
+          exit 1
