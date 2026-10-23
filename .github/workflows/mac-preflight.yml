@@ -1,0 +1,90 @@
+name: Inspect free macOS build capacity
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    name: Read-only standard macOS preflight
+    # Standard runner minutes are free for public repositories only.
+    if: ${{ github.event.repository.private == false }}
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      # No checkout, downloads, installs, cleanup, artifact uploads, or signing.
+      - name: Inspect runner and available storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Repository: $GITHUB_REPOSITORY"
+          echo "Workflow commit: $GITHUB_SHA"
+          echo "Runner label: macos-26 (standard)"
+          echo "Runner OS: ${RUNNER_OS:-unknown}"
+          echo "Runner architecture: ${RUNNER_ARCH:-unknown}"
+          echo "Image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+          sw_vers
+          uname -m
+          sysctl hw.ncpu hw.physicalcpu hw.logicalcpu hw.memsize
+          sysctl machdep.cpu.brand_string || true
+          echo "Disk capacity and free space:"
+          df -h "$GITHUB_WORKSPACE" /Applications "$RUNNER_TEMP"
+          df -k "$GITHUB_WORKSPACE"
+          echo "Installed Xcode applications (listing only; not deleting):"
+          for app in /Applications/Xcode*.app; do
+            if [ -e "$app" ]; then
+              ls -ld "$app"
+            fi
+          done
+          free_kib=$(df -k "$GITHUB_WORKSPACE" | awk 'END {print $4}')
+          ram_bytes=$(sysctl -n hw.memsize)
+          cpu_count=$(sysctl -n hw.logicalcpu)
+          {
+            echo "## Read-only macOS build preflight"
+            echo "- Repository: $GITHUB_REPOSITORY"
+            echo "- Workflow commit: $GITHUB_SHA"
+            echo "- Runner: macos-26 (standard), $(uname -m)"
+            echo "- Image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            echo "- Logical CPUs: $cpu_count"
+            awk -v bytes="$ram_bytes" 'BEGIN {printf "- RAM: %.2f GiB\n", bytes / 1073741824}'
+            awk -v kib="$free_kib" 'BEGIN {printf "- Available workspace disk: %.2f GiB\n", kib / 1048576}'
+            echo ""
+            echo "Reference only: the upstream ARM64 resource tar contained about 11.4 GiB before compression; its compressed resource archive was about 2.47 GiB and its final compressed source/build checkpoint about 6.55 GiB. Object output and packaging require additional space."
+            echo ""
+            echo "This preflight does not establish that a full compile fits or succeeds. No cleanup, checkout, download, install, artifact upload, signing, or application test was performed."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Inspect selected and required Xcode toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Selected developer directory:"
+          xcode-select -p || true
+          echo "Selected Xcode version:"
+          xcodebuild -version || true
+          echo "Selected macOS SDK:"
+          xcrun --sdk macosx --show-sdk-path || true
+          xcrun --sdk macosx --show-sdk-version || true
+          echo "Selected compiler and Metal tool locations (no component download):"
+          xcrun --find clang || true
+          xcrun --find metal || true
+          echo "Toolchain directories:"
+          for directory in /Library/Developer/Toolchains /Library/Developer/DeveloperDiskImages /System/Library/AssetsV2/com_apple_MobileAsset_MetalToolchain; do
+            if [ -d "$directory" ]; then
+              ls -ld "$directory"
+              ls "$directory" || true
+            fi
+          done
+          required_xcode=/Applications/Xcode_26.5.app
+          if [ -d "$required_xcode" ]; then
+            echo "Required upstream Xcode exists: $required_xcode"
+            DEVELOPER_DIR="$required_xcode/Contents/Developer" xcodebuild -version || true
+            DEVELOPER_DIR="$required_xcode/Contents/Developer" xcrun --sdk macosx --show-sdk-version || true
+            DEVELOPER_DIR="$required_xcode/Contents/Developer" xcrun --find metal || true
+            echo "- Required upstream Xcode 26.5: present; see logs for SDK and Metal lookup results." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Required upstream Xcode is missing: $required_xcode"
+            echo "- Required upstream Xcode 26.5: missing. The stock setup script cannot run unchanged." >> "$GITHUB_STEP_SUMMARY"
+          fi
