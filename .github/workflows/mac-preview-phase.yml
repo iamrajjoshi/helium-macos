@@ -1,0 +1,125 @@
+name: Compile one bounded ARM64 preview phase
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      phase:
+        required: true
+        type: number
+      restore_key:
+        default: ''
+        type: string
+    outputs:
+      status:
+        value: ${{ jobs.compile.outputs.status }}
+      checkpoint:
+        value: ${{ jobs.compile.outputs.checkpoint }}
+      complete_checkpoint:
+        value: ${{ jobs.compile.outputs.complete_checkpoint }}
+
+permissions:
+  contents: read
+  actions: write # Delete only this run's consumed cache; no settings changes.
+
+jobs:
+  compile:
+    if: ${{ github.repository == 'iamrajjoshi/helium-macos' && github.event.repository.private == false }}
+    runs-on: macos-26
+    timeout-minutes: 350
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      PHASE: ${{ inputs.phase }}
+      CHECKPOINT_KEY: helium-preview-${{ github.run_id }}-${{ inputs.phase }}-${{ github.run_attempt }}
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+    outputs:
+      status: ${{ steps.build.outputs.status }}
+      checkpoint: ${{ steps.completed.outputs.checkpoint }}
+      complete_checkpoint: ${{ steps.completed.outputs.complete_checkpoint }}
+    steps:
+      - name: Validate immutable source input
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: iamrajjoshi/helium
+          ref: ${{ inputs.source_sha }}
+          path: helium-chromium
+          persist-credentials: false
+      - name: Verify free cache settings without changing them
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            await require('./.github/scripts/mac_preview_cache.js')({github, context, core}, 'check');
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Prepare standard runner without deleting host tools
+        shell: bash
+        run: bash .github/scripts/mac_preview.sh setup
+      - name: Restore exact same-run checkpoint
+        if: ${{ inputs.restore_key != '' }}
+        id: restore
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: preview-checkpoint
+          key: ${{ inputs.restore_key }}
+          fail-on-cache-miss: true
+      - name: Verify and unpack source/build checkpoint
+        if: ${{ inputs.restore_key != '' }}
+        shell: bash
+        run: |
+          if [[ "$CACHE_HIT" != true ]]; then
+            echo '::error::Refusing a partial-prefix or missing checkpoint cache match.'
+            exit 1
+          fi
+          bash .github/scripts/mac_preview.sh restore
+        env:
+          CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
+      - name: Prepare and configure pinned sources
+        if: ${{ inputs.restore_key == '' }}
+        shell: bash
+        run: bash .github/scripts/mac_preview.sh prepare
+      - name: Compile complete real browser, driver and installer
+        id: build
+        shell: bash
+        run: bash .github/scripts/mac_preview.sh build
+      - name: Pack and hash bounded checkpoint
+        shell: bash
+        run: bash .github/scripts/mac_preview.sh checkpoint
+      - name: Enforce free cache cap and replace only this run's consumed checkpoint
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            await require('./.github/scripts/mac_preview_cache.js')({github, context, core}, 'prepare-save');
+      - name: Save checkpoint without Actions artifact storage
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: preview-checkpoint
+          key: ${{ env.CHECKPOINT_KEY }}
+      - name: Verify checkpoint actually exists
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            await require('./.github/scripts/mac_preview_cache.js')({github, context, core}, 'verify-save');
+      - name: Export checkpoint only after verified save
+        id: completed
+        shell: bash
+        env:
+          BUILD_STATUS: ${{ steps.build.outputs.status }}
+        run: |
+          echo "checkpoint=$CHECKPOINT_KEY" >> "$GITHUB_OUTPUT"
+          if [[ "$BUILD_STATUS" == built ]]; then
+            echo "complete_checkpoint=$CHECKPOINT_KEY" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Always report status and keep full console logs
+        if: ${{ always() }}
+        shell: bash
+        run: bash .github/scripts/mac_preview.sh summary
