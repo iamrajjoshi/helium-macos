@@ -7,6 +7,10 @@ on:
         description: 'Exact reviewed 40-character commit in iamrajjoshi/helium; never a branch or tag'
         required: true
         type: string
+      recover_phase_one:
+        description: 'Recover only the reviewed phase-1 checkpoint from run 40019797612'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -22,6 +26,8 @@ jobs:
     with:
       source_sha: ${{ inputs.source_sha }}
       phase: 1
+      recover_phase_one: ${{ inputs.recover_phase_one }}
+      restore_key: ${{ inputs.recover_phase_one && 'helium-preview-40019797612-1-1' || '' }}
 
   build_02:
     needs: build_01
@@ -158,6 +164,7 @@ jobs:
           bash .github/scripts/mac_preview.sh restore
         env:
           CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
+          RESTORE_KEY: ${{ env.COMPLETE_KEY }}
       - name: Make DMG, verify ad-hoc signature, mount read-only and launch packaged app
         shell: bash
         run: bash .github/scripts/mac_preview.sh package
