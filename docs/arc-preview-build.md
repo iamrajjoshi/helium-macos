@@ -2,7 +2,7 @@
 
 This is a workflow candidate, not evidence that a Chromium compile or native
 feature test has passed. Use only `iamrajjoshi/helium-macos`, with reviewed source
-`be567e1c7535cdf2b12381b9d283336469181834` in `iamrajjoshi/helium` as the required
+`0b1af54b49c343484035c0977a85c4cc8642595a` in `iamrajjoshi/helium` as the required
 `source_sha` dispatch input. There is no moving branch/tag default.
 
 ## Initial build and verification boundary
@@ -105,9 +105,11 @@ the guard. An overshoot is reported as failure, not claimed to be retroactively
 free. Do not run other cache-producing workflows concurrently with this build.
 
 Restore requires an exact cache hit, SHA-256 validation, and matching source
-and packaging commits, GN args hash, Xcode/SDK/Metal, Python, clang/GN/Siso
-hashes, architecture and targets. A changed toolchain deliberately blocks
-reuse. Saving is confirmed through the API, not inferred from action success.
+and packaging commits, GN args hash, Xcode/SDK, Python, clang/GN/Siso hashes,
+architecture and targets. Schema 2 records the Metal and metallib executable
+SHA-256 hashes and Metal version output. Only the six-character randomized
+cryptex mount suffix is normalized; toolchain version and all other path parts
+remain exact. A changed toolchain deliberately blocks reuse. Saving is confirmed through the API, not inferred from action success.
 
 Successful final draft upload removes this run's cache. Failed runs retain at
 most their bounded checkpoint subject to ordinary cache retention/eviction
@@ -127,6 +129,48 @@ Gatekeeper bypass is provided.
 7 GiB RAM, disk capacity, the checkpoint limit, GUI availability, or the phase
 budget may still prevent completion. Nothing in source inspection establishes
 a completed build or reliable installable release.
+
+## One-time recovery of the reviewed phase-1 checkpoint
+
+Leave `recover_phase_one=false` for ordinary fresh builds. The only recovery
+option is `recover_phase_one=true`, with source commit
+`0b1af54b49c343484035c0977a85c4cc8642595a`. It restores only
+`helium-preview-40019797612-1-1`, produced by packaging commit
+`7935eb905b333044ade4653a144b1ac3e1b0a8f1`. There is no arbitrary cache-key,
+old-commit, digest, runner or toolchain override. This must be independently
+reviewed before dispatch, and the default-branch discovery stub must expose the
+same boolean input when using GitHub's web dispatch form.
+
+Before extraction, the archived build SHA-256 must equal
+`4c775ddebcde7ea0be330be1f24533dc341bd67b2de2fd7672191f1c655545f1`,
+and the exact legacy provenance bytes must hash to
+`00f840bbaa377de729dd8edefda8031acfb1b1fc1a49e621e97fb0ef46290ae0`.
+Every non-CI Git tree entry (content, mode and submodule pointer) must match the
+original reviewed packaging tree. Only the enumerated recovery helpers,
+workflow definitions, regression tests and this document may differ.
+
+Legacy provenance recorded Metal's version-bearing path, not its executable
+hash. The one-time migration compares every legacy field exactly except schema,
+the audited CI-only packaging commit and the known random mount suffix. This
+is **not retrospective Metal binary-hash verification**. The workflow instead
+regenerates GN without cleaning object files, requires `use_system_xcode=true`
+and empty `angle_metal_toolchain_dir`, rejects stale Metal mount references in
+generated build commands, and removes only ANGLE's three declared generated
+Metal outputs (`mtl_internal_shaders_autogen.air`,
+`mtl_internal_shaders_autogen.metallib`, `mtl_internal_shaders_metallib.h`) so the
+current verified tools rebuild them and dependent consumers. All other objects
+and incremental build state remain. New checkpoints use strict schema 2, and
+carry a hashed `recovery-origin.json` audit report. Metadata mismatches report
+the differing field names and fail closed.
+
+The exact old cache is the same authorized task, never an unrelated cache.
+Prefer retaining it until its successor is saved and verified. If both copies
+would breach the fixed 10 GiB total, only that exact old key may be consumed
+after validated restoration and a complete, hashed local successor, immediately
+before upload. The console warns that an upload failure then loses the resume
+point. Invalid/missing migration evidence or insufficient space even after
+that deletion fails without touching other caches. Similar-prefix keys are
+never included. This recovery does not change billing settings or permissions.
 
 ## Commands and later native-test route
 
