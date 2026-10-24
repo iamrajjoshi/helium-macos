@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strict checkpoint identity plus one explicitly pinned legacy migration."""
+"""Strict checkpoint identity plus one explicitly pinned schema-2 bridge."""
 import hashlib
 import json
 import os
@@ -8,14 +8,16 @@ import re
 import subprocess
 import sys
 
-LEGACY_KEY = 'helium-preview-40019797612-1-1'
-LEGACY_SOURCE = '0b1af54b49c343484035c0977a85c4cc8642595a'
-LEGACY_PACKAGING = '7935eb905b333044ade4653a144b1ac3e1b0a8f1'
-LEGACY_ARCHIVE_SHA256 = '4c775ddebcde7ea0be330be1f24533dc341bd67b2de2fd7672191f1c655545f1'
-LEGACY_PROVENANCE_SHA256 = '00f840bbaa377de729dd8edefda8031acfb1b1fc1a49e621e97fb0ef46290ae0'
-LEGACY_METAL = '/var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.42.0.MXlKIW/Metal.xctoolchain/usr/bin/metal'
+BRIDGE_KEY = 'helium-preview-40051201468-1-1'
+BRIDGE_SOURCE = '0b1af54b49c343484035c0977a85c4cc8642595a'
+BRIDGE_PACKAGING = '1f1cc956e4c094f43dad5f3b1fd6e211ca3cb004'
+BRIDGE_ARCHIVE_SHA256 = 'b2169963676226e1580379471ffee31b0ad531d26f4a4eb72e615e0e7c38608c'
+BRIDGE_PROVENANCE_SHA256 = '0b85d0d5f225daaae3744c750eebbc426ee278a76c8f519f20b308c4975e5c99'
+BRIDGE_ORIGIN_SHA256 = '4458ead84e320cef30263461afcd18c3be72fba0835e33fa39f303dbdd842d24'
+BRIDGE_METAL_RAW_PATH = '/var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.42.0.f8TSG3/Metal.xctoolchain/usr/bin/metal'
+BRIDGE_METAL_RAW_VERSION = 'Apple metal version 32023.883 (metalfe-32023.883)\nTarget: air64-apple-darwin25.6.0\nThread model: posix\nInstalledDir: /private/var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.42.0.f8TSG3/Metal.xctoolchain/usr/metal/current/bin'
 # Every other Git tree entry (including executable modes and submodule pointers)
-# must equal the audited original packaging commit. These are CI-only changes.
+# must equal the audited saved packaging commit. These are CI-only changes.
 RECOVERY_CI_PATHS = frozenset({
     '.github/scripts/mac_preview.sh',
     '.github/scripts/mac_preview_provenance.py',
@@ -27,7 +29,7 @@ RECOVERY_CI_PATHS = frozenset({
     'tests/test_mac_preview_cache.js',
     'docs/arc-preview-build.md',
 })
-LEGACY_BUILD_TREE_SHA256 = 'af6bed91b8c6bffcea50a4d10768b23f34e9a518ec2955f9094fc3db51979fa9'
+BRIDGE_BUILD_TREE_SHA256 = 'af6bed91b8c6bffcea50a4d10768b23f34e9a518ec2955f9094fc3db51979fa9'
 METAL_PATH = re.compile(r'(?P<root>/var/run/com\.apple\.security\.cryptexd/mnt/com\.apple\.MobileAsset\.MetalToolchain-v(?P<version>\d+(?:\.\d+){3}))\.(?P<nonce>[A-Za-z0-9]{6})(?P<tail>/Metal\.xctoolchain/usr/bin/metal)\Z')
 MOUNT_IN_GRAPH = re.compile(rb'/var/run/com\.apple\.security\.cryptexd/mnt/com\.apple\.MobileAsset\.MetalToolchain-v\d+(?:\.\d+){3}\.[A-Za-z0-9]{6}')
 
@@ -55,12 +57,34 @@ def stable_metal_path(path):
     return match['root'] + '.<mount>' + match['tail']
 
 
+def stable_metal_version(path, version):
+    stable = stable_metal_path(path)
+    require(bool(version), 'Empty Metal version output')
+    # The actual Metal version reports a /private/var alias and a different
+    # internal bin directory. Normalize only a recognized InstalledDir line
+    # using this xcrun path's exact version AND nonce. All other text survives.
+    actual_bin = str(Path(path).parent)
+    stable_bin = str(Path(stable).parent)
+    allowed = {
+        actual_bin: stable_bin,
+        '/private' + actual_bin.removesuffix('/usr/bin') + '/usr/metal/current/bin':
+            '/private' + stable_bin.removesuffix('/usr/bin') + '/usr/metal/current/bin',
+    }
+    lines = version.split('\n')
+    installed = [index for index, line in enumerate(lines) if line.startswith('InstalledDir:')]
+    require(len(installed) <= 1, 'Repeated Metal InstalledDir lines')
+    for index in installed:
+        line = lines[index]
+        require(line.startswith('InstalledDir: '), 'Unexpected Metal InstalledDir format')
+        directory = line.removeprefix('InstalledDir: ')
+        require(directory in allowed, 'Metal InstalledDir differs from the verified xcrun toolchain')
+        lines[index] = 'InstalledDir: ' + allowed[directory]
+    return '\n'.join(lines)
+
+
 def metal_identity(path, version, metallib):
     stable = stable_metal_path(path)
-    # Clang-style version output may contain InstalledDir. Remove only the same
-    # verified mount nonce there, not version/build/target information.
-    version = version.replace(str(Path(path).parent), str(Path(stable).parent))
-    require(bool(version), 'Empty Metal version output')
+    version = stable_metal_version(path, version)
     require(Path(metallib) == Path(path).with_name('metallib'), 'Metal/metallib toolchains differ')
     return {'path': stable, 'version': version, 'sha256': digest(path),
             'metallib_sha256': digest(metallib)}
@@ -100,66 +124,74 @@ def build_tree_digest(tree):
 
 def audit_packaging(root):
     tree = subprocess.check_output(['git', '-C', str(root), 'ls-tree', '-rz', 'HEAD'])
-    require(build_tree_digest(tree) == LEGACY_BUILD_TREE_SHA256,
-            'Packaging build inputs differ from the exact legacy commit')
+    require(build_tree_digest(tree) == BRIDGE_BUILD_TREE_SHA256,
+            'Packaging build inputs differ from the exact saved commit')
 
 
-def is_legacy_request():
+def is_bridge_request():
     return os.environ.get('RECOVER_PHASE_ONE') == 'true'
 
 
 def checkpoint_gate(root):
     """Run before extraction. No free-form cache key or digest input is accepted."""
     key = os.environ.get('RESTORE_KEY', '')
-    if not is_legacy_request():
+    if not is_bridge_request():
         run = os.environ.get('GITHUB_RUN_ID', '')
         require(re.fullmatch(r'[1-9][0-9]*', run) is not None, 'Invalid current run ID')
         require(re.fullmatch(r'helium-preview-' + run + r'-(?:[1-9]|10)-[1-9][0-9]*', key) is not None,
                 'Normal restore must use this run\'s exact checkpoint')
         return
-    require(key == LEGACY_KEY and os.environ.get('PHASE') == '1', 'Legacy recovery key/phase mismatch')
-    require(os.environ.get('SOURCE_SHA') == LEGACY_SOURCE, 'Legacy recovery source mismatch')
+    require(key == BRIDGE_KEY and os.environ.get('PHASE') == '1', 'Checkpoint bridge key/phase mismatch')
+    require(os.environ.get('SOURCE_SHA') == BRIDGE_SOURCE, 'Checkpoint bridge source mismatch')
     checkpoint = Path(root) / 'preview-checkpoint'
-    require(digest(checkpoint / 'build.tar.zst') == LEGACY_ARCHIVE_SHA256, 'Legacy archive hash mismatch')
-    require(digest(checkpoint / 'provenance.json') == LEGACY_PROVENANCE_SHA256, 'Legacy provenance hash mismatch')
+    require(digest(checkpoint / 'build.tar.zst') == BRIDGE_ARCHIVE_SHA256, 'Bridge archive hash mismatch')
+    require(digest(checkpoint / 'provenance.json') == BRIDGE_PROVENANCE_SHA256, 'Bridge provenance hash mismatch')
+    require(digest(checkpoint / 'recovery-origin.json') == BRIDGE_ORIGIN_SHA256, 'Bridge prior recovery-origin hash mismatch')
     audit_packaging(root)
 
 
-def verify_metadata(saved, current, legacy=False):
+def verify_metadata(saved, current, bridge=False):
     require(current.get('schema') == 2, 'Current provenance schema must be 2')
     require(set(current.get('metal', {})) == {'path', 'version', 'sha256', 'metallib_sha256'}, 'Invalid Metal identity fields')
     require(all(re.fullmatch(r'[0-9a-f]{64}', current['metal'][key]) for key in ['sha256', 'metallib_sha256']), 'Invalid Metal executable hash')
     require(bool(current['metal']['version']), 'Missing Metal version')
-    if not legacy:
-        differences = sorted(key for key in saved.keys() | current.keys() if saved.get(key) != current.get(key))
-        require(saved == current, 'Source/configuration/toolchain provenance changed: ' + ', '.join(differences))
-        return
-    require(saved.get('schema') == 1, 'Legacy provenance schema mismatch')
-    require(saved.get('source_sha') == LEGACY_SOURCE and saved.get('packaging_sha') == LEGACY_PACKAGING,
-            'Legacy source/packaging identity mismatch')
-    require(saved.get('metal') == LEGACY_METAL, 'Legacy Metal path mismatch')
-    require(stable_metal_path(saved['metal']) == current['metal']['path'], 'Legacy Metal toolchain version/path changed')
-    # Only these three audited fields migrate. Unknown/missing or changed fields
-    # anywhere else fail equality, including SDK path, Python, GN and clang hashes.
-    expected = dict(saved, schema=2, packaging_sha=current['packaging_sha'], metal=current['metal'])
+    expected = saved
+    if bridge:
+        require(saved.get('schema') == 2, 'Bridge requires saved schema-2 provenance')
+        require(saved.get('source_sha') == BRIDGE_SOURCE and saved.get('packaging_sha') == BRIDGE_PACKAGING,
+                'Bridge source/packaging identity mismatch')
+        require(saved['metal']['version'] == BRIDGE_METAL_RAW_VERSION,
+                'Bridge saved Metal version differs from the exact recorded value')
+        require(saved['metal']['path'] == stable_metal_path(BRIDGE_METAL_RAW_PATH),
+                'Bridge saved Metal path mismatch')
+        # Only the independently audited CI-helper packaging commit and this
+        # exact saved InstalledDir mount normalization can differ.
+        # In particular, Metal hashes/version, SDK paths and every unknown field
+        # retain exact equality. No schema-1 migration or tool-output deletion.
+        metal = dict(saved['metal'], version=stable_metal_version(BRIDGE_METAL_RAW_PATH, saved['metal']['version']))
+        expected = dict(saved, packaging_sha=current['packaging_sha'], metal=metal)
     differences = sorted(key for key in expected.keys() | current.keys() if expected.get(key) != current.get(key))
-    require(expected == current, 'Legacy metadata differs beyond the audited migration: ' + ', '.join(differences))
+    require(expected == current, 'Source/configuration/toolchain provenance changed: ' + ', '.join(differences))
 
 
 def verify(root):
     root = Path(root)
     saved = json.loads((root / 'preview-checkpoint/provenance.json').read_text())
     current = json.loads((root / 'preview-logs/provenance-current.json').read_text())
-    legacy = is_legacy_request()
-    verify_metadata(saved, current, legacy)
-    if legacy:
+    bridge = is_bridge_request()
+    verify_metadata(saved, current, bridge)
+    if bridge:
+        prior_origin = root / 'preview-checkpoint/recovery-origin.json'
+        require(digest(prior_origin) == BRIDGE_ORIGIN_SHA256, 'Bridge prior recovery-origin hash mismatch')
         report = {
-            'checkpoint_key': LEGACY_KEY, 'archive_sha256': LEGACY_ARCHIVE_SHA256,
-            'legacy_provenance_sha256': LEGACY_PROVENANCE_SHA256,
-            'legacy_packaging_sha': LEGACY_PACKAGING,
+            'checkpoint_key': BRIDGE_KEY, 'archive_sha256': BRIDGE_ARCHIVE_SHA256,
+            'saved_provenance_sha256': BRIDGE_PROVENANCE_SHA256,
+            'saved_packaging_sha': BRIDGE_PACKAGING,
+            'prior_recovery_origin_sha256': BRIDGE_ORIGIN_SHA256,
             'new_packaging_sha': current['packaging_sha'],
-            'unchanged_build_tree_sha256': LEGACY_BUILD_TREE_SHA256,
-            'metal_historical_evidence': 'Legacy recorded exact toolchain version/path, not executable bytes. Only the known mount nonce is normalized; all other legacy metadata is identical. Metal and metallib hashes plus version output are enforced from schema 2 onward. The three declared ANGLE Metal generated outputs are invalidated for rebuilding.',
+            'unchanged_build_tree_sha256': BRIDGE_BUILD_TREE_SHA256,
+            'prior_recovery_origin': json.loads(prior_origin.read_text()),
+            'bridge_scope': 'Saved and current schema-2 metadata match exactly except the audited CI-only packaging commit and the exact recorded Metal InstalledDir mount nonce normalization. Metal version/target/thread text and both executable hashes remain exact. No object output is deleted. The saved restricted-pax archive may cause rebuilds; successors use full pax to retain nanosecond mtimes.',
         }
         (root / 'preview-logs/recovery-origin.json').write_text(json.dumps(report, sort_keys=True, indent=2) + '\n')
         print(json.dumps(report, sort_keys=True, indent=2))
@@ -177,45 +209,6 @@ def check_graph(root):
                 require(mount == current_mount, f'Stale Metal mount remains in build graph: {path}')
 
 
-def invalidate_legacy_metal(root):
-    require(is_legacy_request(), 'Metal invalidation is only for the pinned migration')
-    root = Path(root)
-    gn = root / 'build/src/buildtools/mac/gn'
-    value = subprocess.check_output([str(gn), 'args', str(root / 'build/src/out/Default'),
-                                     '--list=angle_metal_toolchain_dir', '--short'],
-                                    cwd=root / 'build/src', text=True)
-    print(f'GN angle_metal_toolchain_dir raw: {value!r}', flush=True)
-    require(value.strip() == 'angle_metal_toolchain_dir = ""', 'Legacy recovery requires the default Metal toolchain')
-    # Chromium declares use_system_xcode="" then computes its effective boolean
-    # outside declare_args. `gn args --list` therefore cannot prove that value.
-    # Inspect the real generated actions instead of guessing from an argument.
-    target_root = '//third_party/angle/src/libANGLE/renderer/metal'
-    wrapper = target_root + '/shaders/metal_wrapper.py'
-    actions = [('angle_metal_internal_shaders_to_air', 'metal', 'mtl_internal_shaders_autogen.air'),
-               ('angle_metal_internal_shaders_to_mtllib', 'metallib', 'mtl_internal_shaders_autogen.metallib')]
-    for target, tool, output in actions:
-        label = target_root + ':' + target
-        raw = subprocess.check_output([str(gn), 'desc', str(root / 'build/src/out/Default'),
-                                       label, '--format=json'], cwd=root / 'build/src', text=True)
-        print(f'GN desc {label} raw: {raw!r}', flush=True)
-        description = json.loads(raw)
-        require(set(description) == {label}, 'Unexpected Metal action target description')
-        action = description[label]
-        require(action.get('type') == 'action' and action.get('script') == wrapper,
-                'Unexpected Metal action type/wrapper')
-        require(isinstance(action.get('args'), list) and action['args'][:2] == ['xcrun', tool],
-                'Generated Metal action does not use the verified system xcrun route')
-        require(action.get('outputs') == ['//out/Default/gen/angle/' + output],
-                'Unexpected generated Metal action output')
-    folder = root / 'build/src/out/Default/gen/angle'
-    for name in ['mtl_internal_shaders_autogen.air', 'mtl_internal_shaders_autogen.metallib',
-                 'mtl_internal_shaders_metallib.h']:
-        path = folder / name
-        if path.exists() or path.is_symlink():
-            path.unlink()
-            print(f'Invalidated legacy generated Metal output: {path}')
-
-
 if __name__ == '__main__':
     action, root = sys.argv[1:]
     if action == 'record':
@@ -226,7 +219,5 @@ if __name__ == '__main__':
         verify(root)
     elif action == 'check-graph':
         check_graph(root)
-    elif action == 'invalidate-legacy-metal':
-        invalidate_legacy_metal(root)
     else:
         raise SystemExit('Unknown provenance action')
