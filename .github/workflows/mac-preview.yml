@@ -7,6 +7,10 @@ on:
         description: 'Select arc-preview branch above; exact reviewed 40-character source commit'
         required: true
         type: string
+      recover_phase_one:
+        description: 'Recover only the reviewed phase-1 checkpoint from run 40019797612'
+        type: boolean
+        default: false
 
 permissions: {}
 
