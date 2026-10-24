@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       recover_phase_one:
-        description: 'Recover only the reviewed phase-1 checkpoint from run 40019797612'
+        description: 'Recover only the reviewed phase-1 checkpoint from run 40051201468'
         type: boolean
         default: false
 
@@ -27,7 +27,7 @@ jobs:
       source_sha: ${{ inputs.source_sha }}
       phase: 1
       recover_phase_one: ${{ inputs.recover_phase_one }}
-      restore_key: ${{ inputs.recover_phase_one && 'helium-preview-40019797612-1-1' || '' }}
+      restore_key: ${{ inputs.recover_phase_one && 'helium-preview-40051201468-1-1' || '' }}
 
   build_02:
     needs: build_01
