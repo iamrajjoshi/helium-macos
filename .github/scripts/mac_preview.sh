@@ -22,33 +22,7 @@ validate_inputs() {
   xcrun --find metal
 }
 record_provenance() {
-  python3 - "$ROOT" <<'PY'
-import hashlib, json, os, pathlib, subprocess, sys
-r = pathlib.Path(sys.argv[1])
-def command(*a): return subprocess.check_output(a, text=True).strip()
-def digest(p):
-    h = hashlib.sha256()
-    with p.open('rb') as f:
-        for b in iter(lambda: f.read(8*1024*1024), b''): h.update(b)
-    return h.hexdigest()
-p = {
-    'schema': 1, 'source_repository': 'iamrajjoshi/helium',
-    'source_sha': os.environ['SOURCE_SHA'], 'packaging_sha': os.environ['GITHUB_SHA'],
-    'arch': command('uname', '-m'), 'xcode': command('xcodebuild', '-version'),
-    'sdk_version': command('xcrun', '--sdk', 'macosx', '--show-sdk-version'),
-    'sdk_build': command('xcrun', '--sdk', 'macosx', '--show-sdk-build-version'),
-    'sdk_path': command('xcrun', '--sdk', 'macosx', '--show-sdk-path'),
-    'metal': command('xcrun', '--find', 'metal'),
-    'python': command('python3', '--version'),
-    'args_sha256': digest(r/'build/src/out/Default/args.gn'),
-    'clang_sha256': digest(r/'build/src/third_party/llvm-build/Release+Asserts/bin/clang'),
-    'gn_sha256': digest(r/'build/src/buildtools/mac/gn'),
-    'siso_sha256': digest(r/'build/src/third_party/siso/cipd/siso'),
-    'targets': ['chrome', 'chromedriver', 'chrome/installer/mac'],
-    'compile_jobs': 2, 'link_jobs': 1,
-}
-print(json.dumps(p, sort_keys=True, indent=2))
-PY
+  python3 "$ROOT/.github/scripts/mac_preview_provenance.py" record "$ROOT"
 }
 
 case "${1:-}" in
@@ -99,14 +73,27 @@ GN
     echo '[preview:prepare] Preparation complete'
     ;;
   restore)
-    # The cache is exact-key, this run only. Check hashes before extracting any data.
+    # Exact same-run cache, or the single explicitly pinned legacy recovery.
+    # Verify the independent pinned legacy hashes before extracting any data.
+    python3 .github/scripts/mac_preview_provenance.py checkpoint-gate "$ROOT"
     (cd preview-checkpoint && shasum -a 256 -c SHA256SUMS)
     test ! -e build/src || fail 'Refusing to extract over an existing source tree.'
     mkdir -p build
     zstd -dc preview-checkpoint/build.tar.zst | tar -xf - -C build
-    cp preview-checkpoint/provenance.json "$LOG/provenance.json"
     record_provenance > "$LOG/provenance-current.json"
-    cmp "$LOG/provenance.json" "$LOG/provenance-current.json" || fail 'Source/configuration/toolchain provenance changed; checkpoint cannot be reused.'
+    python3 .github/scripts/mac_preview_provenance.py verify "$ROOT"
+    if [[ -f preview-checkpoint/recovery-origin.json && "${RECOVER_PHASE_ONE:-false}" != true ]]; then
+      cp preview-checkpoint/recovery-origin.json "$LOG/recovery-origin.json"
+    fi
+    # Refresh generated host/SDK paths without cleaning objects or changing args.
+    source "$ROOT/devutils/shared.sh"
+    gn_gen 2>&1 | tee "$LOG/gn-restore.log"
+    python3 .github/scripts/mac_preview_provenance.py check-graph "$ROOT"
+    if [[ "${RECOVER_PHASE_ONE:-false}" == true ]]; then
+      python3 .github/scripts/mac_preview_provenance.py invalidate-legacy-metal "$ROOT"
+    fi
+    record_provenance > "$LOG/provenance.json"
+    cmp "$LOG/provenance-current.json" "$LOG/provenance.json" || fail 'Configuration/toolchain changed while refreshing restored graph.'
     cp build/src/out/Default/args.gn "$LOG/args.gn"
     # Keep only metadata after successful validation so packing the successor fits disk.
     rm preview-checkpoint/build.tar.zst
@@ -143,7 +130,15 @@ from pathlib import Path
 p = Path('preview-checkpoint/build.tar.zst')
 assert 0 < p.stat().st_size <= 9*1024**3, 'Checkpoint exceeds the 9 GiB free-cache safety cap; do not upload.'
 PY
-    (cd preview-checkpoint && shasum -a 256 build.tar.zst provenance.json > SHA256SUMS)
+    if [[ -f "$LOG/recovery-origin.json" ]]; then
+      cp "$LOG/recovery-origin.json" preview-checkpoint/recovery-origin.json
+    fi
+    (
+      cd preview-checkpoint
+      files=(build.tar.zst provenance.json)
+      if [[ -f recovery-origin.json ]]; then files+=(recovery-origin.json); fi
+      shasum -a 256 "${files[@]}" > SHA256SUMS
+    )
     cat preview-checkpoint/SHA256SUMS
     ;;
   test)
