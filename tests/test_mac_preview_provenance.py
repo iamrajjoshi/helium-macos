@@ -37,6 +37,115 @@ def current_metadata():
                        'sha256': '5' * 64, 'metallib_sha256': '6' * 64})
 
 
+def metal_action_results():
+    root = '//third_party/angle/src/libANGLE/renderer/metal'
+    values = ['angle_metal_toolchain_dir = ""\n']
+    for name, tool, output in [('angle_metal_internal_shaders_to_air', 'metal', 'mtl_internal_shaders_autogen.air'),
+                               ('angle_metal_internal_shaders_to_mtllib', 'metallib', 'mtl_internal_shaders_autogen.metallib')]:
+        values.append(json.dumps({root + ':' + name: {'type': 'action', 'script': root + '/shaders/metal_wrapper.py',
+                                                     'args': ['xcrun', tool], 'outputs': ['//out/Default/gen/angle/' + output]}}))
+    return values
+
+# Copyright 2019 The ANGLE Project Authors. BSD-style license.
+# Exact run_metal_tool template/actions from ANGLE commit
+# 3b89d84e9d59f75675ac4e2bef58fc068a9f0577, src/libANGLE/renderer/metal/BUILD.gn.
+PINNED_ANGLE_METAL_ACTIONS = r'''  template("run_metal_tool") {
+    action(target_name) {
+      forward_variables_from(invoker,
+                             [
+                               "deps",
+                               "sources",
+                               "outputs",
+                               "metal_tool",
+                             ])
+      script = "shaders/metal_wrapper.py"
+      if (angle_metal_toolchain_dir != "") {
+        # Explicit Metal toolchain: run the "metal"/"metallib" binaries directly
+        # from the provided directory. This bypasses "xcrun" and the hermetic
+        # Chromium Mac SDK, which is required to prebuild the internal shaders
+        # for iOS and other cross-compilation scenarios.
+        args = [ angle_metal_toolchain_dir + "/" + metal_tool ]
+      } else if (use_system_xcode) {
+        # System Xcode: run metal and metallib via xcrun. Since Xcode 26.0, the
+        # Metal toolchain has been unbundled from Xcode, and must be installed
+        # separately by running `xcodebuild -downloadComponent MetalToolchain`.
+        # There is a vestigial metal executable in mac_bin_path, but it’s
+        # incapable of running successfuly without the
+        # rest of the Metal toolchain surrounding it. `xcrun` is able to find
+        # and run the correct Metal toolchain when properly installed.
+        #
+        # If you’re using system Xcode and your build fails with this message:
+        #   error: error: cannot execute tool 'metal' due to missing Metal Toolchain; use: xcodebuild -downloadComponent MetalToolchain
+        # then do what the error message suggests, and then retry your build.
+        args = [
+          "xcrun",
+          metal_tool,
+        ]
+      } else {
+        # Hermetic Xcode: at least for now, the Metal toolchain is
+        # “spliced” into the location in the hermetic toolchain where it
+        # lived before Xcode 26.0, so it can be run directly from there.
+        args = [ mac_bin_path + metal_tool ]
+      }
+
+      args += invoker.args
+    }
+  }
+
+  _metal_internal_shaders_air_file =
+      "$root_gen_dir/angle/mtl_internal_shaders_autogen.air"
+
+  run_metal_tool("angle_metal_internal_shaders_to_air") {
+    _metal_internal_shaders_metal_source =
+        "shaders/mtl_internal_shaders_autogen.metal"
+    sources = [ _metal_internal_shaders_metal_source ]
+
+    outputs = [ _metal_internal_shaders_air_file ]
+
+    metal_tool = "metal"
+
+    args = [
+      "-c",
+      rebase_path(_metal_internal_shaders_metal_source, root_build_dir),
+      "-o",
+      rebase_path(_metal_internal_shaders_air_file, root_build_dir),
+    ]
+
+    if (is_mac) {
+      args += [
+        "--std=macos-metal2.1",
+        "-mmacosx-version-min=10.14",
+      ]
+    } else if (is_ios) {
+      args += [
+        "--std=ios-metal2.1",
+        "-mios-version-min=12",
+      ]
+    }
+  }
+
+  _metal_internal_shaders_metallib_file =
+      "$root_gen_dir/angle/mtl_internal_shaders_autogen.metallib"
+
+  run_metal_tool("angle_metal_internal_shaders_to_mtllib") {
+    deps = [ ":angle_metal_internal_shaders_to_air" ]
+
+    sources = [ _metal_internal_shaders_air_file ]
+
+    outputs = [ _metal_internal_shaders_metallib_file ]
+
+    metal_tool = "metallib"
+
+    args = [
+      rebase_path(_metal_internal_shaders_air_file, root_build_dir),
+      "-o",
+      rebase_path(_metal_internal_shaders_metallib_file, root_build_dir),
+    ]
+  }
+
+'''
+
+
 class PreviewProvenance(unittest.TestCase):
     def test_exact_saved_manifest_fixture_matches_logged_sha256(self):
         raw = (json.dumps(legacy_metadata(), sort_keys=True, indent=2) + '\n').encode()
@@ -153,16 +262,89 @@ class PreviewProvenance(unittest.TestCase):
             names = ['mtl_internal_shaders_autogen.air', 'mtl_internal_shaders_autogen.metallib', 'mtl_internal_shaders_metallib.h']
             for name in names + ['unrelated.o']: (out / name).write_bytes(b'keep or rebuild')
             with mock.patch.dict(os.environ, {'RECOVER_PHASE_ONE': 'true'}), \
-                    mock.patch.object(p.subprocess, 'check_output', side_effect=['angle_metal_toolchain_dir = ""\n', 'use_system_xcode = true\n']):
+                    mock.patch.object(p.subprocess, 'check_output', side_effect=metal_action_results()):
                 p.invalidate_legacy_metal(root)
             self.assertTrue((out / 'unrelated.o').exists())
             self.assertTrue(all(not (out / name).exists() for name in names))
-            with mock.patch.dict(os.environ, {'RECOVER_PHASE_ONE': 'true'}), \
-                    mock.patch.object(p.subprocess, 'check_output', return_value='angle_metal_toolchain_dir = "/other"\n'), self.assertRaises(ValueError):
+
+    def test_wrong_generated_route_wrapper_target_or_output_preserves_outputs(self):
+        good = metal_action_results()
+        variants = [['angle_metal_toolchain_dir = "/other"\n']]
+        for field, value in [('type', 'group'), ('script', '//other.py'), ('args', ['/hermetic/metal']),
+                             ('outputs', ['//out/Default/gen/other.air'])]:
+            altered = json.loads(good[1]); altered[next(iter(altered))][field] = value
+            variants.append([good[0], json.dumps(altered), good[2]])
+        variants.append([good[0], '{}', good[2]])
+        altered = json.loads(good[2]); altered[next(iter(altered))]['args'] = ['xcrun', 'not-metallib']
+        variants.append([good[0], good[1], json.dumps(altered)])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); out = root / 'build/src/out/Default/gen/angle'; out.mkdir(parents=True)
+            output = out / 'mtl_internal_shaders_autogen.air'; output.write_bytes(b'preserve')
+            for responses in variants:
+                with mock.patch.dict(os.environ, {'RECOVER_PHASE_ONE': 'true'}), \
+                        mock.patch.object(p.subprocess, 'check_output', side_effect=responses), self.assertRaises(ValueError):
+                    p.invalidate_legacy_metal(root)
+                self.assertEqual(output.read_bytes(), b'preserve')
+
+    def test_real_pinned_gn_computed_arg_and_generated_action_semantics(self):
+        binary = os.environ.get('HELIUM_TEST_GN_BINARY')
+        if not binary:
+            self.skipTest('Set HELIUM_TEST_GN_BINARY to official pinned GN to run real semantics')
+        binary = str(Path(binary).resolve())
+        self.assertEqual(subprocess.check_output([binary, '--version'], text=True).strip(), '2578 (510ec7992c30)')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); source = root / 'build/src'; source.mkdir(parents=True)
+            (source / '.gn').write_text('buildconfig = "//BUILDCONFIG.gn"\n')
+            # Pinned Chromium build_overrides/build.gni declares an empty arg,
+            # then computes its boolean outside declare_args. GN reports the
+            # declared argument value, not that later effective boolean.
+            (source / 'BUILDCONFIG.gn').write_text('''set_default_toolchain("//:default")
+declare_args() {
+  use_system_xcode = ""
+  angle_metal_toolchain_dir = ""
+}
+if (use_system_xcode == "") {
+  _result = 0
+  use_system_xcode = _result != 1
+}
+is_mac = true
+is_ios = false
+mac_bin_path = "/hermetic/"
+''')
+            label_root = '//third_party/angle/src/libANGLE/renderer/metal'
+            (source / 'BUILD.gn').write_text('''toolchain("default") {
+  tool("stamp") { command = "touch {{output}}" }
+}
+group("all") {
+  deps = [ "//third_party/angle/src/libANGLE/renderer/metal:angle_metal_internal_shaders_to_mtllib" ]
+}
+''')
+            metal = source / label_root.removeprefix('//'); metal.mkdir(parents=True)
+            (metal / 'BUILD.gn').write_text(PINNED_ANGLE_METAL_ACTIONS)
+            (metal / 'shaders').mkdir()
+            (metal / 'shaders/metal_wrapper.py').write_text('# Not executed in this GN-only test.\n')
+            (metal / 'shaders/mtl_internal_shaders_autogen.metal').write_text('// Fixture input\n')
+            gn = source / 'buildtools/mac/gn'; gn.parent.mkdir(parents=True); gn.symlink_to(binary)
+            def generate(args):
+                subprocess.run([binary, 'gen', 'out/Default', '--args=' + args], cwd=source,
+                               check=True, capture_output=True, text=True)
+            generate('')
+            reported = subprocess.check_output([binary, 'args', 'out/Default', '--list=use_system_xcode', '--short'], cwd=source, text=True)
+            self.assertEqual(reported.strip(), 'use_system_xcode = ""')
+            print('Real pinned GN declared use_system_xcode output:', repr(reported))
+            out = source / 'out/Default/gen/angle'; out.mkdir(parents=True, exist_ok=True)
+            names = ['mtl_internal_shaders_autogen.air', 'mtl_internal_shaders_autogen.metallib', 'mtl_internal_shaders_metallib.h']
+            for name in names + ['unrelated.o']: (out / name).write_bytes(b'preserve or invalidate')
+            with mock.patch.dict(os.environ, {'RECOVER_PHASE_ONE': 'true'}):
                 p.invalidate_legacy_metal(root)
-            with mock.patch.dict(os.environ, {'RECOVER_PHASE_ONE': 'true'}), \
-                    mock.patch.object(p.subprocess, 'check_output', side_effect=['angle_metal_toolchain_dir = ""\n', 'use_system_xcode = false\n']), self.assertRaises(ValueError):
-                p.invalidate_legacy_metal(root)
+            self.assertTrue(all(not (out / name).exists() for name in names))
+            self.assertTrue((out / 'unrelated.o').exists())
+            for args in ['use_system_xcode=false', 'angle_metal_toolchain_dir="/other"']:
+                generate(args)
+                output = out / names[0]; output.write_bytes(b'preserve')
+                with mock.patch.dict(os.environ, {'RECOVER_PHASE_ONE': 'true'}), self.assertRaises(ValueError):
+                    p.invalidate_legacy_metal(root)
+                self.assertEqual(output.read_bytes(), b'preserve')
 
 
 if __name__ == '__main__':
