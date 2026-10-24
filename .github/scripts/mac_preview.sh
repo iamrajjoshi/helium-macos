@@ -73,8 +73,8 @@ GN
     echo '[preview:prepare] Preparation complete'
     ;;
   restore)
-    # Exact same-run cache, or the single explicitly pinned legacy recovery.
-    # Verify the independent pinned legacy hashes before extracting any data.
+    # Exact same-run cache, or the single explicitly pinned schema-2 bridge.
+    # Verify the independent pinned checkpoint hashes before extracting any data.
     python3 .github/scripts/mac_preview_provenance.py checkpoint-gate "$ROOT"
     (cd preview-checkpoint && shasum -a 256 -c SHA256SUMS)
     test ! -e build/src || fail 'Refusing to extract over an existing source tree.'
@@ -89,9 +89,6 @@ GN
     source "$ROOT/devutils/shared.sh"
     gn_gen 2>&1 | tee "$LOG/gn-restore.log"
     python3 .github/scripts/mac_preview_provenance.py check-graph "$ROOT"
-    if [[ "${RECOVER_PHASE_ONE:-false}" == true ]]; then
-      python3 .github/scripts/mac_preview_provenance.py invalidate-legacy-metal "$ROOT"
-    fi
     record_provenance > "$LOG/provenance.json"
     cmp "$LOG/provenance-current.json" "$LOG/provenance.json" || fail 'Configuration/toolchain changed while refreshing restored graph.'
     cp build/src/out/Default/args.gn "$LOG/args.gn"
@@ -124,7 +121,10 @@ GN
     mkdir -p preview-checkpoint
     cp "$LOG/provenance.json" preview-checkpoint/
     # zstd -3 / two threads is intentionally lower-memory than upstream -11 / all cores.
-    tar -C build -cf - src | zstd -3 -T2 -o preview-checkpoint/build.tar.zst
+    # BSD tar's default restricted pax drops nanosecond mtimes for ordinary
+    # entries. Siso records those timestamps and can invalidate unchanged
+    # objects after restore. Full pax is required, not just a content hash.
+    tar --format pax -C build -cf - src | zstd -3 -T2 -o preview-checkpoint/build.tar.zst
     python3 - <<'PY'
 from pathlib import Path
 p = Path('preview-checkpoint/build.tar.zst')
