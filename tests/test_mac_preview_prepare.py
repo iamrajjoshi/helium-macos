@@ -23,6 +23,17 @@ class PreviewPrepare(unittest.TestCase):
         self.script.parent.mkdir(parents=True)
         self.script.write_bytes((ROOT / '.github/scripts/mac_preview.sh').read_bytes())
         self.source.mkdir(parents=True)
+        helper_source = (ROOT / '.github/scripts/mac_preview_provenance.py').read_text()
+        fixture_cryptex = str(self.root / 'cryptex')
+        (self.script.parent / 'mac_preview_provenance.py').write_text(
+            helper_source.replace('/var/run/com', fixture_cryptex + '/com'))
+        metal_folder = Path(fixture_cryptex) / 'com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.42.0.ABC123/Metal.xctoolchain/usr/bin'
+        metal_folder.mkdir(parents=True)
+        self.metal = metal_folder / 'metal'
+        self.metal.write_text('#!/bin/sh\necho "Fixture Metal version 1"\n')
+        self.metal.chmod(0o755)
+        self.metallib = metal_folder / 'metallib'
+        self.metallib.write_text('Fixture metallib bytes\n')
         (self.source / '.gn').write_text('# Fixture source root\n')
         helper = self.root / 'devutils/shared.sh'
         helper.parent.mkdir()
@@ -63,6 +74,10 @@ print('Done. Fixture graph generated.' if command == 'gen' else 'fixture_arg = t
             file = self.bin / name
             file.write_text('#!/bin/sh\nprintf "fixture tool metadata\\n"\n')
             file.chmod(0o755)
+        (self.bin / 'xcrun').write_text(
+            '#!/bin/sh\nif [ "$1" = --find ]; then\n'
+            f'  printf "%s\\n" "{metal_folder}/$2"\n'
+            'else\n  echo "fixture tool metadata"\nfi\n')
         self.env = dict(os.environ, PATH=f'{self.bin}{os.pathsep}{os.environ["PATH"]}',
                         GN_CALLS=str(self.root / 'gn-calls.jsonl'),
                         SOURCE_SHA='a' * 40, GITHUB_SHA='b' * 40)
