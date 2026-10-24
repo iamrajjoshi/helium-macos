@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -137,6 +138,117 @@ gn_gen 2>&1 | tee generated.log
         self.assertIn('Record source/configuration/toolchain provenance', result.stdout)
         self.assertIn(str(self.clang), result.stdout)
         self.assertNotIn('Preparation complete', result.stdout)
+
+
+class PreviewCheckpoint(unittest.TestCase):
+    """Real archive tools and optional pinned GN/Siso, not browser/native QA."""
+
+    def setUp(self):
+        if not shutil.which('zstd') or not shutil.which('tar'):
+            self.skipTest('Real tar and zstd executables are required')
+        self.temp = tempfile.TemporaryDirectory(prefix='helium checkpoint ')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.source = self.root / 'build/src'
+        self.out = self.source / 'out/Default'
+        self.out.mkdir(parents=True)
+        self.script = self.root / '.github/scripts/mac_preview.sh'
+        self.script.parent.mkdir(parents=True)
+        self.script.write_bytes((ROOT / '.github/scripts/mac_preview.sh').read_bytes())
+        (self.root / 'preview-logs').mkdir()
+        (self.root / 'preview-logs/provenance.json').write_text('{"fixture": true}\n')
+
+    def checkpoint(self):
+        result = subprocess.run(['bash', str(self.script), 'checkpoint'], cwd=self.root,
+                                text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return self.root / 'preview-checkpoint/build.tar.zst'
+
+    def restore(self, archive):
+        # Exercise the production decompression/extraction commands. Preserve
+        # the same absolute source root while creating new filesystem objects.
+        shutil.rmtree(self.source)
+        result = subprocess.run(['bash', '-o', 'pipefail', '-c',
+                                 'zstd -dc "$1" | tar -xf - -C "$2"',
+                                 'restore', str(archive), str(self.root / 'build')],
+                                text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_production_checkpoint_preserves_bytes_modes_and_nanosecond_mtimes(self):
+        files = [self.source / 'input.cc', self.out / 'output.o',
+                 self.out / '.siso_fs_state', self.out / '.siso_deps']
+        before = {}
+        for index, path in enumerate(files):
+            path.write_bytes(b'fixture\x00' + bytes([index]))
+            path.chmod(0o755 if index == 0 else 0o644)
+            timestamp = 1700000000000000000 + 123456789 + index
+            os.utime(path, ns=(timestamp, timestamp))
+            before[path] = (path.read_bytes(), path.stat().st_mode & 0o777,
+                            path.stat().st_mtime_ns)
+        link = self.out / 'source-link'
+        link.symlink_to('../../input.cc')
+        archive = self.checkpoint()
+        self.restore(archive)
+        for path, expected in before.items():
+            self.assertEqual((path.read_bytes(), path.stat().st_mode & 0o777,
+                              path.stat().st_mtime_ns), expected, str(path))
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), '../../input.cc')
+
+    def test_real_pinned_gn_siso_reuses_checkpoint_with_and_without_regeneration(self):
+        gn = os.environ.get('HELIUM_TEST_GN_BINARY')
+        siso = os.environ.get('HELIUM_TEST_SISO_BINARY')
+        if not gn or not siso:
+            self.skipTest('Set HELIUM_TEST_GN_BINARY and HELIUM_TEST_SISO_BINARY for real reuse regression')
+        self.assertEqual(subprocess.check_output([gn, '--version'], text=True).strip(),
+                         '2578 (510ec7992c30)')
+        version = subprocess.check_output([siso, 'version'], text=True)
+        self.assertTrue(version.startswith('siso v1.6.3\n'), version)
+        (self.source / '.gn').write_text('buildconfig = "//BUILDCONFIG.gn"\n')
+        (self.source / 'BUILDCONFIG.gn').write_text('set_default_toolchain("//:default")\n')
+        (self.source / 'copy.py').write_text('import shutil,sys\nshutil.copyfile(sys.argv[1],sys.argv[2])\n')
+        count = 32
+        graph = ['toolchain("default") { tool("stamp") { command = "touch {{output}}" } }']
+        for index in range(count):
+            (self.source / f'input{index:03}').write_text(f'content {index}\n')
+            graph.append(f'action("copy{index:03}") {{ script="copy.py" '
+                         f'sources=["input{index:03}"] outputs=["$target_gen_dir/result{index:03}"] '
+                         'args=[rebase_path(sources[0],root_build_dir),rebase_path(outputs[0],root_build_dir)] }')
+        graph.append('group("all") { deps=[' + ','.join(f'":copy{i:03}"' for i in range(count)) + '] }')
+        (self.source / 'BUILD.gn').write_text('\n'.join(graph) + '\n')
+
+        def generate():
+            result = subprocess.run([gn, 'gen', 'out/Default'], cwd=self.source,
+                                    text=True, capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        def build():
+            result = subprocess.run([siso, 'ninja', '-C', 'out/Default', '--load', '',
+                                     '--local_jobs=2', 'all'], cwd=self.source,
+                                    text=True, capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return result.stdout + result.stderr
+
+        generate()
+        self.assertIn(f'local:{count} ', build())
+        before = {path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+                  for path in (self.out / 'gen').glob('result*')}
+        self.assertEqual(len(before), count)
+        archive = self.checkpoint()
+        for regenerate in [False, True]:
+            with self.subTest(regenerate=regenerate):
+                self.restore(archive)
+                if regenerate:
+                    generate()
+                output = build()
+                self.assertIn('ninja: no work to do.', output)
+                self.assertEqual((self.out / 'siso_explain').read_text(), '')
+                self.assertEqual({path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+                                  for path in (self.out / 'gen').glob('result*')}, before)
+        # Negative control: restored state must not suppress a real source edit.
+        (self.source / 'input000').write_text('changed input\n')
+        self.assertIn('local:1 ', build())
+        self.assertEqual((self.out / 'gen/result000').read_text(), 'changed input\n')
 
 
 if __name__ == '__main__':
