@@ -50,7 +50,7 @@ jobs:
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           if [[ "$RECOVER_PHASE_ONE" == true ]]; then
-            [[ "$PHASE" == 1 && "$RESTORE_KEY" == helium-preview-40019797612-1-1 ]]
+            [[ "$PHASE" == 1 && "$RESTORE_KEY" == helium-preview-40051201468-1-1 ]]
             [[ "$SOURCE_SHA" == 0b1af54b49c343484035c0977a85c4cc8642595a ]]
           fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
