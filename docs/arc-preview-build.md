@@ -153,8 +153,10 @@ Legacy provenance recorded Metal's version-bearing path, not its executable
 hash. The one-time migration compares every legacy field exactly except schema,
 the audited CI-only packaging commit and the known random mount suffix. This
 is **not retrospective Metal binary-hash verification**. The workflow instead
-regenerates GN without cleaning object files, requires `use_system_xcode=true`
-and empty `angle_metal_toolchain_dir`, rejects stale Metal mount references in
+regenerates GN without cleaning object files, requires empty
+`angle_metal_toolchain_dir`, and inspects the exact generated ANGLE action
+descriptions to require the expected wrapper, outputs and literal
+`xcrun metal` / `xcrun metallib` commands. It rejects stale Metal mount references in
 generated build commands, and removes only ANGLE's three declared generated
 Metal outputs (`mtl_internal_shaders_autogen.air`,
 `mtl_internal_shaders_autogen.metallib`, `mtl_internal_shaders_metallib.h`) so the
@@ -202,6 +204,18 @@ are extracted from the exact patches, and JSON summaries reject missing, zero,
 skipped, failed or retried passes. This robust runner is **not evidence those
 native tests have run**.
 
+## Local GN semantics regression
+
+Run all wrapper/provenance tests with `python3 -m unittest discover -s tests -p
+"test_mac_preview_*.py"` and `node tests/test_mac_preview_cache.js`. To include
+real GN semantics, set `HELIUM_TEST_GN_BINARY` to the official Chromium-pinned
+GN revision `510ec7992c30f172205792f190e96111a896ba8f` executable. The test runs
+the exact pinned ANGLE action template on a small temporary graph, proving
+that the declared `use_system_xcode` argument can remain empty while generated
+actions select system Xcode. It validates/rejects generated system, hermetic and
+override routes without executing Metal or claiming a native Mac build. Without
+that executable the real-GN test is explicitly skipped, not a passed test.
+
 ## Primary evidence
 
 - [Upstream platform build instructions](https://github.com/imputnet/helium-macos/blob/main/docs/building.md)
@@ -215,3 +229,6 @@ native tests have run**.
 - [Pinned CFI defaults](https://github.com/chromium/chromium/blob/156.0.8078.47/build/config/sanitizers/sanitizers.gni)
 - [Pinned link concurrency](https://github.com/chromium/chromium/blob/156.0.8078.47/build/toolchain/concurrent_links.gni)
 - [Mac build/test commands](https://chromium.googlesource.com/chromium/src/+/main/docs/mac_build_instructions.md)
+
+- [Computed Xcode selection](https://github.com/chromium/chromium/blob/156.0.8078.47/build_overrides/build.gni#L72-L104)
+- [Pinned ANGLE Metal actions](https://github.com/google/angle/blob/3b89d84e9d59f75675ac4e2bef58fc068a9f0577/src/libANGLE/renderer/metal/BUILD.gn#L27-L120)
