@@ -97,67 +97,73 @@ async function denied(m,op='check') {await assert.rejects(cache(m.args,op)); ass
     await cache(m.args,'verify-save');await cache(m.args,'cleanup');assert.deepStrictEqual(m.deleted,[1]);
   });
 
-  const legacyKey='helium-preview-40019797612-1-1';
-  const legacy={id:4,key:legacyKey,size_in_bytes:3*GiB};
-  const similar={id:5,key:legacyKey+'0',size_in_bytes:1000};
-  const evidence={checkpoint_key:legacyKey,
-    archive_sha256:'4c775ddebcde7ea0be330be1f24533dc341bd67b2de2fd7672191f1c655545f1',
-    legacy_provenance_sha256:'00f840bbaa377de729dd8edefda8031acfb1b1fc1a49e621e97fb0ef46290ae0',
-    legacy_packaging_sha:'7935eb905b333044ade4653a144b1ac3e1b0a8f1',
+  const bootstrapKey='helium-preview-40051201468-1-1';
+  const bootstrap={id:4,key:bootstrapKey,size_in_bytes:3*GiB};
+  const similar={id:5,key:bootstrapKey+'0',size_in_bytes:1000};
+  const evidence={checkpoint_key:bootstrapKey,
+    archive_sha256:'b2169963676226e1580379471ffee31b0ad531d26f4a4eb72e615e0e7c38608c',
+    saved_provenance_sha256:'0b85d0d5f225daaae3744c750eebbc426ee278a76c8f519f20b308c4975e5c99',
+    saved_packaging_sha:'1f1cc956e4c094f43dad5f3b1fd6e211ca3cb004',
+    prior_recovery_origin_sha256:'4458ead84e320cef30263461afcd18c3be72fba0835e33fa39f303dbdd842d24',
     unchanged_build_tree_sha256:'af6bed91b8c6bffcea50a4d10768b23f34e9a518ec2955f9094fc3db51979fa9',
     new_packaging_sha:'b'.repeat(40)};
   fs.mkdirSync('preview-logs');
   const evidencePath='preview-logs/recovery-origin.json';
   const writeEvidence=(value=evidence)=>fs.writeFileSync(evidencePath,JSON.stringify(value));
   writeEvidence();
-  Object.assign(process.env,{RECOVER_PHASE_ONE:'true',PHASE:'1',RESTORE_KEY:legacyKey,
+  Object.assign(process.env,{RECOVER_PHASE_ONE:'true',PHASE:'1',RESTORE_KEY:bootstrapKey,
     SOURCE_SHA:'0b1af54b49c343484035c0977a85c4cc8642595a',GITHUB_SHA:'b'.repeat(40)});
   await test('bootstrap retains old until successor is verified when room allows',async()=>{
-    const m=mock([legacy,unrelated,similar]);await cache(m.args,'prepare-save');assert.deepStrictEqual(m.deleted,[]);
-    const saved=mock([legacy,unrelated,similar,{...own,size_in_bytes:GiB}]);process.env.CHECKPOINT_KEY=own.key;
+    const m=mock([bootstrap,unrelated,similar]);await cache(m.args,'prepare-save');assert.deepStrictEqual(m.deleted,[]);
+    const saved=mock([bootstrap,unrelated,similar,{...own,size_in_bytes:GiB}]);process.env.CHECKPOINT_KEY=own.key;
     await cache(saved.args,'verify-save');assert.deepStrictEqual(saved.deleted,[4]);
   });
   await test('bootstrap consumes only exact old key when both would exceed cap',async()=>{
     fs.truncateSync(checkpoint,4*GiB);
-    const m=mock([{...legacy,size_in_bytes:4*GiB},{...unrelated,size_in_bytes:3*GiB},similar]);
+    const m=mock([{...bootstrap,size_in_bytes:4*GiB},{...unrelated,size_in_bytes:3*GiB},similar]);
     await cache(m.args,'prepare-save');assert.deepStrictEqual(m.deleted,[4]);assert.strictEqual(m.warnings.length,1);
     fs.truncateSync(checkpoint,19);
   });
   await test('insufficient budget even after old removal never deletes anything',async()=>{
     fs.truncateSync(checkpoint,8*GiB);
-    await denied(mock([legacy,{...unrelated,size_in_bytes:3*GiB}]),'prepare-save');fs.truncateSync(checkpoint,19);
+    await denied(mock([bootstrap,{...unrelated,size_in_bytes:3*GiB}]),'prepare-save');fs.truncateSync(checkpoint,19);
   });
   await test('bootstrap missing successor does not delete old',async()=>{
-    process.env.CHECKPOINT_KEY=own.key;await denied(mock([legacy,unrelated]),'verify-save');
+    process.env.CHECKPOINT_KEY=own.key;await denied(mock([bootstrap,unrelated]),'verify-save');
   });
   await test('bootstrap post-save overshoot does not delete old',async()=>{
-    await denied(mock([legacy,{...own,size_in_bytes:8*GiB}]),'verify-save');
+    await denied(mock([bootstrap,{...own,size_in_bytes:8*GiB}]),'verify-save');
   });
-  await test('bootstrap requires migration evidence before any deletion',async()=>{
-    fs.unlinkSync(evidencePath);await denied(mock([legacy]),'prepare-save');writeEvidence();
+  await test('bootstrap requires bridge evidence before any deletion',async()=>{
+    fs.unlinkSync(evidencePath);await denied(mock([bootstrap]),'prepare-save');writeEvidence();
   });
   for(const field of Object.keys(evidence)) {
     await test(`bootstrap rejects mismatched evidence ${field}`,async()=>{
-      writeEvidence({...evidence,[field]:'wrong'});await denied(mock([legacy]),'prepare-save');writeEvidence();
+      writeEvidence({...evidence,[field]:'wrong'});await denied(mock([bootstrap]),'prepare-save');writeEvidence();
     });
   }
-  for(const [field,value] of [['PHASE','2'],['RESTORE_KEY',legacyKey+'0'],['SOURCE_SHA','a'.repeat(40)],['GITHUB_SHA','c'.repeat(40)]]) {
+  for(const [field,value] of [['PHASE','2'],['RESTORE_KEY',bootstrapKey+'0'],['SOURCE_SHA','a'.repeat(40)],['GITHUB_SHA','c'.repeat(40)]]) {
     await test(`bootstrap rejects mismatched context ${field}`,async()=>{
-      const old=process.env[field];process.env[field]=value;await denied(mock([legacy]),'prepare-save');process.env[field]=old;
+      const old=process.env[field];process.env[field]=value;await denied(mock([bootstrap]),'prepare-save');process.env[field]=old;
     });
   }
-  await test('bootstrap disabled leaves legacy untouched',async()=>{
-    process.env.RECOVER_PHASE_ONE='false';const m=mock([legacy]);await cache(m.args,'prepare-save');assert.deepStrictEqual(m.deleted,[]);process.env.RECOVER_PHASE_ONE='true';
+  await test('bootstrap disabled leaves bootstrap untouched',async()=>{
+    process.env.RECOVER_PHASE_ONE='false';const m=mock([bootstrap]);await cache(m.args,'prepare-save');assert.deepStrictEqual(m.deleted,[]);process.env.RECOVER_PHASE_ONE='true';
+  });
+  await test('former schema1 recovery key is unrelated and never deleted',async()=>{
+    const former={id:7,key:'helium-preview-40019797612-1-1',size_in_bytes:GiB};
+    const m=mock([bootstrap,former,{...own,size_in_bytes:GiB}]);process.env.CHECKPOINT_KEY=own.key;
+    await cache(m.args,'verify-save');assert.deepStrictEqual(m.deleted,[4]);
   });
   await test('ambiguous exact old key fails closed',async()=>{
-    await denied(mock([legacy,{...legacy,id:6}]),'prepare-save');
+    await denied(mock([bootstrap,{...bootstrap,id:6}]),'prepare-save');
   });
   await test('old cache deletion must be verified after successful successor',async()=>{
-    const m=mock([legacy,{...own,size_in_bytes:GiB}],{keepDeleted:true});
+    const m=mock([bootstrap,{...own,size_in_bytes:GiB}],{keepDeleted:true});
     await assert.rejects(cache(m.args,'verify-save'));assert.deepStrictEqual(m.deleted,[4]);
   });
-  await test('ordinary cleanup never expands to legacy prefix',async()=>{
-    const m=mock([legacy,similar,{...own,size_in_bytes:GiB}]);await cache(m.args,'cleanup');assert.deepStrictEqual(m.deleted,[1]);
+  await test('ordinary cleanup never expands to bootstrap prefix',async()=>{
+    const m=mock([bootstrap,similar,{...own,size_in_bytes:GiB}]);await cache(m.args,'cleanup');assert.deepStrictEqual(m.deleted,[1]);
   });
   console.log(`${passed} cache guard scenarios passed.`);
 })().finally(()=>{process.chdir(original);fs.rmSync(directory,{recursive:true});});
