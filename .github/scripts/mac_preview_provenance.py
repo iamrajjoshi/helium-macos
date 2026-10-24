@@ -183,12 +183,30 @@ def invalidate_legacy_metal(root):
     gn = root / 'build/src/buildtools/mac/gn'
     value = subprocess.check_output([str(gn), 'args', str(root / 'build/src/out/Default'),
                                      '--list=angle_metal_toolchain_dir', '--short'],
-                                    cwd=root / 'build/src', text=True).strip()
-    require(value == 'angle_metal_toolchain_dir = ""', 'Legacy recovery requires the default system Metal toolchain')
-    system = subprocess.check_output([str(gn), 'args', str(root / 'build/src/out/Default'),
-                                      '--list=use_system_xcode', '--short'],
-                                     cwd=root / 'build/src', text=True).strip()
-    require(system == 'use_system_xcode = true', 'Legacy recovery requires use_system_xcode=true')
+                                    cwd=root / 'build/src', text=True)
+    print(f'GN angle_metal_toolchain_dir raw: {value!r}', flush=True)
+    require(value.strip() == 'angle_metal_toolchain_dir = ""', 'Legacy recovery requires the default Metal toolchain')
+    # Chromium declares use_system_xcode="" then computes its effective boolean
+    # outside declare_args. `gn args --list` therefore cannot prove that value.
+    # Inspect the real generated actions instead of guessing from an argument.
+    target_root = '//third_party/angle/src/libANGLE/renderer/metal'
+    wrapper = target_root + '/shaders/metal_wrapper.py'
+    actions = [('angle_metal_internal_shaders_to_air', 'metal', 'mtl_internal_shaders_autogen.air'),
+               ('angle_metal_internal_shaders_to_mtllib', 'metallib', 'mtl_internal_shaders_autogen.metallib')]
+    for target, tool, output in actions:
+        label = target_root + ':' + target
+        raw = subprocess.check_output([str(gn), 'desc', str(root / 'build/src/out/Default'),
+                                       label, '--format=json'], cwd=root / 'build/src', text=True)
+        print(f'GN desc {label} raw: {raw!r}', flush=True)
+        description = json.loads(raw)
+        require(set(description) == {label}, 'Unexpected Metal action target description')
+        action = description[label]
+        require(action.get('type') == 'action' and action.get('script') == wrapper,
+                'Unexpected Metal action type/wrapper')
+        require(isinstance(action.get('args'), list) and action['args'][:2] == ['xcrun', tool],
+                'Generated Metal action does not use the verified system xcrun route')
+        require(action.get('outputs') == ['//out/Default/gen/angle/' + output],
+                'Unexpected generated Metal action output')
     folder = root / 'build/src/out/Default/gen/angle'
     for name in ['mtl_internal_shaders_autogen.air', 'mtl_internal_shaders_autogen.metallib',
                  'mtl_internal_shaders_metallib.h']:
