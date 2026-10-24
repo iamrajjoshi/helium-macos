@@ -111,6 +111,27 @@ SHA-256 hashes and Metal version output. Only the six-character randomized
 cryptex mount suffix is normalized; toolchain version and all other path parts
 remain exact. A changed toolchain deliberately blocks reuse. Saving is confirmed through the API, not inferred from action success.
 
+Checkpoint creation explicitly uses **full pax** (`tar --format pax`) to preserve
+nanosecond modification times as well as bytes, modes, symlinks and hidden Siso
+state. BSD tar's default restricted-pax format can round ordinary entries to
+whole seconds. The pinned Siso stores nanosecond timestamps; after restoration,
+it can discard output command records and rebuild unchanged objects. This was
+reproduced with the real pinned GN and Siso: restricted-pax restored builds
+repeated actions both with and without an explicit GN regeneration, while
+full-pax restored builds ran zero actions in both cases. Skipping regeneration
+is therefore not a fix, and host-path refresh and strict provenance stay enabled.
+
+Older restricted-pax checkpoints still validate their content hashes, but are
+**not proven to retain incremental reuse**. Merely saving their successor in
+full pax cannot restore timestamp precision already lost in an older archive;
+an old-checkpoint bridge can incur another rebuild. The cross-run bridge must
+pin the exact newly observed cache key, archive/provenance hashes and packaging
+commit after a verified save, allow only reviewed helper changes and the exact InstalledDir normalization
+documented below, and preserve all other schema-2 metadata exactly. No arbitrary checkpoint input is permitted.
+No running job is changed by editing this repository. Do not cancel a phase or
+claim its successor is protected until its cache save and the reviewed bridge
+are both verified.
+
 Successful final draft upload removes this run's cache. Failed runs retain at
 most their bounded checkpoint subject to ordinary cache retention/eviction
 (normally seven inactive days). No per-entry one-day retention input exists in
@@ -130,49 +151,64 @@ Gatekeeper bypass is provided.
 budget may still prevent completion. Nothing in source inspection establishes
 a completed build or reliable installable release.
 
-## One-time recovery of the reviewed phase-1 checkpoint
+## One-time bridge of the verified schema-2 checkpoint
 
 Leave `recover_phase_one=false` for ordinary fresh builds. The only recovery
 option is `recover_phase_one=true`, with source commit
 `0b1af54b49c343484035c0977a85c4cc8642595a`. It restores only
-`helium-preview-40019797612-1-1`, produced by packaging commit
-`7935eb905b333044ade4653a144b1ac3e1b0a8f1`. There is no arbitrary cache-key,
-old-commit, digest, runner or toolchain override. This must be independently
-reviewed before dispatch, and the default-branch discovery stub must expose the
-same boolean input when using GitHub's web dispatch form.
+`helium-preview-40051201468-1-1`, saved and API-verified by run `40051201468`,
+job `120744065130`, using packaging commit
+`1f1cc956e4c094f43dad5f3b1fd6e211ca3cb004`. There is no arbitrary cache-key,
+old-commit, digest, runner or toolchain override. The default-branch discovery
+stub must describe the same boolean recovery input before web dispatch.
 
-Before extraction, the archived build SHA-256 must equal
-`4c775ddebcde7ea0be330be1f24533dc341bd67b2de2fd7672191f1c655545f1`,
-and the exact legacy provenance bytes must hash to
-`00f840bbaa377de729dd8edefda8031acfb1b1fc1a49e621e97fb0ef46290ae0`.
+Before extraction, all three exact byte hashes must match:
+
+- build.tar.zst: `b2169963676226e1580379471ffee31b0ad531d26f4a4eb72e615e0e7c38608c`
+- provenance.json: `0b85d0d5f225daaae3744c750eebbc426ee278a76c8f519f20b308c4975e5c99`
+- recovery-origin.json: `4458ead84e320cef30263461afcd18c3be72fba0835e33fa39f303dbdd842d24`
+
 Every non-CI Git tree entry (content, mode and submodule pointer) must match the
-original reviewed packaging tree. Only the enumerated recovery helpers,
-workflow definitions, regression tests and this document may differ.
+saved packaging tree. Only the enumerated recovery helpers, workflow definitions,
+regression tests and this document may differ. The saved provenance is already
+schema 2: both Metal executable hashes, version, target and thread model remain
+strict, as do all source/compiler/GN/Siso/SDK/args/Python/architecture fields.
+The only permitted differences are the audited packaging commit and normalizing
+the exact saved Metal InstalledDir mount nonce described below. Unknown, missing
+or changed metadata fields fail, with differing top-level names logged.
 
-Legacy provenance recorded Metal's version-bearing path, not its executable
-hash. The one-time migration compares every legacy field exactly except schema,
-the audited CI-only packaging commit and the known random mount suffix. This
-is **not retrospective Metal binary-hash verification**. The workflow instead
-regenerates GN without cleaning object files, requires empty
-`angle_metal_toolchain_dir`, and inspects the exact generated ANGLE action
-descriptions to require the expected wrapper, outputs and literal
-`xcrun metal` / `xcrun metallib` commands. It rejects stale Metal mount references in
-generated build commands, and removes only ANGLE's three declared generated
-Metal outputs (`mtl_internal_shaders_autogen.air`,
-`mtl_internal_shaders_autogen.metallib`, `mtl_internal_shaders_metallib.h`) so the
-current verified tools rebuild them and dependent consumers. All other objects
-and incremental build state remain. New checkpoints use strict schema 2, and
-carry a hashed `recovery-origin.json` audit report. Metadata mismatches report
-the differing field names and fail closed.
+The observed Metal version output uses
+`/private/var/run/...MetalToolchain-v17.6.42.0.f8TSG3/Metal.xctoolchain/usr/metal/current/bin`,
+whereas xcrun returns `/var/run/.../Metal.xctoolchain/usr/bin/metal`.
+Current recording canonicalizes only an exact recognized `InstalledDir:` line
+tied to xcrun's **same version and nonce**, allowing either its bin directory or
+that specific observed private-path alias. Any other path/layout/nonce fails.
+All other version text is retained. The bridge requires the exact saved version
+string and normalizes only its known nonce; it never substitutes the current
+Metal object or accepts changed executable hashes. Subsequent checkpoints use
+the canonical string and strict equality. Schema-1 migration and special deletion
+of Metal outputs are removed from this route.
 
-The exact old cache is the same authorized task, never an unrelated cache.
-Prefer retaining it until its successor is saved and verified. If both copies
-would breach the fixed 10 GiB total, only that exact old key may be consumed
-after validated restoration and a complete, hashed local successor, immediately
-before upload. The console warns that an upload failure then loses the resume
-point. Invalid/missing migration evidence or insufficient space even after
-that deletion fails without touching other caches. Similar-prefix keys are
-never included. This recovery does not change billing settings or permissions.
+GN still regenerates without cleaning objects, and the stale Metal mount graph
+scan stays enabled. The pinned prior recovery report is embedded in the new
+hashed recovery-origin.json to retain the history and its original limitation:
+the first schema-1 checkpoint lacked historical Metal executable hashes.
+That limitation is not repeated or broadened for this schema-2 bridge.
+
+The saved archive used restricted pax, so one more round of unchanged work may
+rebuild after this restore. No lost nanosecond timestamps are invented or
+silently rewritten. Successor checkpoints use full pax; real local GN/Siso
+round-trip tests demonstrate incremental reuse for the corrected format.
+This is not a promise of build completion or a native feature-test result.
+
+Only this exact saved cache is authorized as a cross-run predecessor. Prefer
+retaining it until its successor is saved and verified. If both copies would
+breach the fixed 10 GiB total, only that exact key may be consumed after validated
+restoration and a complete, hashed local successor, immediately before upload.
+The console warns that an upload failure then loses the resume point.
+Invalid/missing bridge evidence or insufficient space even after that deletion
+fails without touching other caches. Similar-prefix and former recovery keys
+are never included. No billing setting or permission changes are made.
 
 ## Commands and later native-test route
 
@@ -204,17 +240,32 @@ are extracted from the exact patches, and JSON summaries reject missing, zero,
 skipped, failed or retried passes. This robust runner is **not evidence those
 native tests have run**.
 
-## Local GN semantics regression
+## Local GN and checkpoint regressions
 
 Run all wrapper/provenance tests with `python3 -m unittest discover -s tests -p
-"test_mac_preview_*.py"` and `node tests/test_mac_preview_cache.js`. To include
-real GN semantics, set `HELIUM_TEST_GN_BINARY` to the official Chromium-pinned
-GN revision `510ec7992c30f172205792f190e96111a896ba8f` executable. The test runs
-the exact pinned ANGLE action template on a small temporary graph, proving
-that the declared `use_system_xcode` argument can remain empty while generated
-actions select system Xcode. It validates/rejects generated system, hermetic and
-override routes without executing Metal or claiming a native Mac build. Without
-that executable the real-GN test is explicitly skipped, not a passed test.
+"test_mac_preview_*.py"` and `node tests/test_mac_preview_cache.js`.
+The exact saved schema-2 metadata and prior-origin fixtures reproduce their
+logged SHA-256 hashes. Negative cases cover every metadata field, Metal hashes,
+version text, InstalledDir layout/version/nonce, archive and origin hashes,
+wrong source/key/phase, changed build inputs, and unrelated-cache preservation.
+
+The checkpoint regression executes the production archive command and real
+tar/zstd extraction, checking exact file bytes, modes, symlink target and
+nanosecond mtimes, including hidden Siso state. With both
+`HELIUM_TEST_GN_BINARY` (revision `510ec7992c30f172205792f190e96111a896ba8f`)
+and `HELIUM_TEST_SISO_BINARY` supplied, it additionally
+builds a temporary graph using actual GN and Siso, restores the production
+checkpoint twice, and requires zero actions both before and after real GN
+regeneration. A changed-source control must run the affected action and change
+its output. Use Chromium's pinned Siso revision
+`c574896b272b40aac6e44c228ee0b471ea7e3d7d` (`v1.6.3`); this is a local
+incremental-build regression, not a Mac browser or native-feature test.
+
+For an actual build, `out/Default/siso_explain` records dirty reasons even
+without `-d explain`; `siso.INFO` and `siso_metrics.json` contain additional
+execution details. Console `S`/`F` action lines are started/finished work, not
+skipped steps. Siso subtracts skipped work from its progress counts, so those
+counts alone must not be presented as proof of checkpoint reuse.
 
 ## Primary evidence
 
@@ -232,3 +283,6 @@ that executable the real-GN test is explicitly skipped, not a passed test.
 
 - [Computed Xcode selection](https://github.com/chromium/chromium/blob/156.0.8078.47/build_overrides/build.gni#L72-L104)
 - [Pinned ANGLE Metal actions](https://github.com/google/angle/blob/3b89d84e9d59f75675ac4e2bef58fc068a9f0577/src/libANGLE/renderer/metal/BUILD.gn#L27-L120)
+- [Restricted-pax timestamp behavior](https://github.com/libarchive/libarchive/blob/v3.8.1/libarchive/archive_write_set_format_pax.c#L1146-L1222)
+- [Pinned Siso timestamp reconciliation](https://chromium.googlesource.com/build/+/c574896b272b40aac6e44c228ee0b471ea7e3d7d/siso/hashfs/state.go#694)
+- [Pinned Siso dirty-reason checks](https://chromium.googlesource.com/build/+/c574896b272b40aac6e44c228ee0b471ea7e3d7d/siso/build/mtimecheck.go#73)
